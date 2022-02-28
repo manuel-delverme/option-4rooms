@@ -18,6 +18,8 @@ import torch.nn
 import wandb.integration.sb3
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
+import emdp
+import emdp.actions
 import hyper
 import option_baselines.aoc
 import option_baselines.common.buffers
@@ -25,8 +27,32 @@ import option_baselines.common.callbacks
 import option_baselines.common.torch_layers
 import task
 
+
+class CustomCNN(stable_baselines3.common.torch_layers.BaseFeaturesExtractor):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim):
+        super(CustomCNN, self).__init__(observation_space, features_dim)
+        # We assume CxHxW images (channels first)
+        # Re-ordering will be done by pre-preprocessing or wrapper
+        assert stable_baselines3.common.preprocessing.is_image_space(observation_space, check_channels=False), (
+            "You should use NatureCNN "
+            f"only with images not with {observation_space}\n"
+            "(you are probably using `CnnPolicy` instead of `MlpPolicy` or `MultiInputPolicy`)\n"
+            "If you are using a custom environment,\n"
+            "please check it using our env checker:\n"
+            "https://stable-baselines3.readthedocs.io/en/master/common/env_checker.html"
+        )
+        n_flatten = observation_space.sample().flatten().shape[0]
+        self.linear = torch.nn.Sequential(
+            torch.nn.Flatten(),
+            torch.nn.Linear(n_flatten, features_dim),
+        )
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        return self.linear(observations)
+
+
 # TODO Lel
-stable_baselines3.common.torch_layers.NatureCNN = option_baselines.common.torch_layers.NatureCNN
+stable_baselines3.common.torch_layers.NatureCNN = CustomCNN
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{os.environ['HOME']}/ffmpeg/ffmpeg-5.0-i686-static/"
@@ -43,13 +69,8 @@ class MetaCombinedExtractor(BaseFeaturesExtractor):
         total_concat_size = 0
         for key, subspace in observation_space.spaces.items():
             if stable_baselines3.common.preprocessing.is_image_space(subspace):
-                class Dummy(BaseFeaturesExtractor):
-                    def forward(self, observations: torch.Tensor) -> torch.Tensor:
-                        del observations
-                        return torch.tensor([])
-
-                extractors[key] = Dummy(subspace, features_dim=float("inf"))
-                total_concat_size += 0
+                extractors[key] = CustomCNN(subspace, features_dim=cnn_output_dim)
+                total_concat_size += cnn_output_dim
             else:
                 # The observation key is a vector, flatten it if needed
                 extractors[key] = torch.nn.Flatten()
@@ -78,53 +99,50 @@ class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCri
 class ACP(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
     def __init__(self, *args, **kwargs):
         kwargs["net_arch"] = [dict(pi=[64, 64], vf=[64, 64])]
-        # kwargs["net_arch"] = [dict(pi=[64, ], vf=[64, ])]
         super(ACP, self).__init__(*args, **kwargs)
 
 
 def enjoy(env):
     state = env.reset()
     print("==========================")
-    print(f"state:\n {state['image'] / 10}")
-    print(f"task: {state['task']}")
+    print(f"state:\n {state}")
     print("==========================")
     while True:
         env.render()
+        print("==========================")
         action = input("Action: ")
         if action == "q":
             break
         elif action == "r":
             state = env.reset()
-            print("==========================")
-            print(f"state:\n {state['image'] / 10}")
-            print(f"task: {state['task']}")
-            print("==========================")
             continue
-        elif action == "w":
-            action = env.actions.forward
-        elif action == "a":
-            action = env.actions.left
         elif action == "d":
-            action = env.actions.right
+            action = emdp.actions.RIGHT
+        elif action == "a":
+            action = emdp.actions.LEFT
+        elif action == "s":
+            action = emdp.actions.DOWN
+        elif action == "w":
+            action = emdp.actions.UP
         else:
-            action = int(action)
+            print("Invalid action", action)
+            continue
 
         state, reward, done, info = env.step(action)
         print("==========================")
-        print(f"state:\n {state['image'] / 10}")
-        print(f"task: {state['task']}")
+        # print(f"state:\n {state['image'] / 10}")
+        # print(f"task: {state['task']}")
         print(f"reward: {reward}")
         print(f"done: {done}")
         print(f"info: {info}")
-        print("==========================")
 
         if done:
             env.reset()
 
 
 def main(buddy_writer, device):
-    test_env = task.make_env(2, 0)
-    enjoy(test_env)
+    # test_env = task.make_env(2, 0)
+    # enjoy(test_env)
 
     envs = wrap_envs()
 
@@ -132,6 +150,7 @@ def main(buddy_writer, device):
         meta_policy=MetaActorCriticPolicy,
         policy=ACP,
         env=envs,
+        n_steps=100,
         num_options=hyper.num_options,
         ent_coef=hyper.entropy_regularization,
         term_coef=hyper.termination_regularization,
@@ -148,6 +167,9 @@ def main(buddy_writer, device):
             self.task_idx_mask = task_idx_mask.unsqueeze(0)
 
         def _on_step(self):
+            if not (self.n_calls % 10) != 0:
+                return
+
             meta_policy = self.locals["self"].policy.meta_policy
             obs_tensor = self.locals["obs_tensor"]
             features = meta_policy.extract_features(obs_tensor)
@@ -166,7 +188,7 @@ def main(buddy_writer, device):
 
             if (self.num_timesteps - self.last_log) <= hyper.log_iterate_every:
                 return
-
+            print("progress", 1 - self.locals["self"]._current_progress_remaining)
             self.last_log = self.num_timesteps
             rollout_steps = self.locals["self"].n_steps
             num_tasks = hyper.num_tasks
@@ -176,18 +198,16 @@ def main(buddy_writer, device):
             switches[rollout_buffer.episode_starts.astype(bool)] = False
 
             buddy_writer.add_scalar("rollout/mean_returns", rollout_buffer.returns.mean(), self.num_timesteps)
+            buddy_writer.add_scalar("rollout/mean_rewards", rollout_buffer.rewards.mean(), self.num_timesteps)
             buddy_writer.add_scalar("rollout/change_points", switches.mean(), self.num_timesteps)
-
-            if hasattr(rollout_buffer, "priority"):
-                priority = rollout_buffer.priority
-                if len(priority) < 3:
-                    priority = priority.repeat(3)[:3]
-                buddy_writer.add_histogram("train/priority", priority, self.num_timesteps)
 
             buddy_writer.add_histogram("rollout/executed_options", executed_options, self.num_timesteps)
 
             env_returns = rollout_buffer.returns.mean(0)
             task_returns = env_returns.reshape(num_tasks, -1).mean(1)
+
+            env_rewards = rollout_buffer.rewards.sum(0)
+            task_rewards = env_rewards.reshape(num_tasks, -1).mean(1)
 
             task_idx_mask = self.task_idx_mask.repeat(rollout_steps, 1)
             for task_idx in range(num_tasks):
@@ -196,11 +216,10 @@ def main(buddy_writer, device):
                     task_executed_option = np.tile(task_executed_option, 3)[:3]
                 buddy_writer.add_histogram(f"task{task_idx}/task_executed_options", task_executed_option, self.num_timesteps)
 
-                if hasattr(rollout_buffer, "priority"):
-                    buddy_writer.add_scalar(f"task{task_idx}/priority", rollout_buffer.priority[task_idx], self.num_timesteps)
-
                 task_return = task_returns[task_idx]
+                task_reward = task_rewards[0]
                 buddy_writer.add_scalar(f"task{task_idx}/mean_return", task_return, self.num_timesteps)
+                buddy_writer.add_scalar(f"task{task_idx}/mean_rewards", task_reward, self.num_timesteps)
 
     cb = stable_baselines3.common.callbacks.CallbackList([
         option_baselines.common.callbacks.OptionRollout(envs, eval_freq=hyper.video_every, n_eval_episodes=5 if hyper.DEBUG else 1),
@@ -222,8 +241,11 @@ def should_record_video(step):
 
 
 def wrap_envs():
+    indices = []
+    for idx in range(hyper.num_tasks):
+        indices.extend([idx] * hyper.num_envs_per_task)
     envs = stable_baselines3.common.vec_env.DummyVecEnv(
-        env_fns=[functools.partial(task.make_env, hyper.num_envs, i) for i in range(hyper.num_envs)],
+        env_fns=[functools.partial(task.make_env, idx) for idx in indices],
     )
     envs = stable_baselines3.common.vec_env.VecVideoRecorder(
         envs,
@@ -238,7 +260,7 @@ if __name__ == "__main__":
     np.random.seed(hyper.seed)
     torch.manual_seed(hyper.seed)
     experiment_buddy.register_defaults(vars(hyper))
-    proc_num = 20
+    # proc_num = 20
     # tb = experiment_buddy.deploy("mila", "sweep.yaml", proc_num=proc_num, run_per_agent=1, disabled=hyper.DEBUG, wandb_kwargs={'project': "ogw"}, )
     # tb = experiment_buddy.deploy("mila", "sweep.yaml", proc_num=25, disabled=hyper.DEBUG)
     # tb = experiment_buddy.deploy("mila", wandb_kwargs=wandb_kwargs)

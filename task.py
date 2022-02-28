@@ -1,9 +1,8 @@
-import random
+import numpy as np
 
 import emdp.actions
 import emdp.gridworld
-import gym.spaces
-import numpy as np
+import hyper
 
 ascii_room = """
 #########
@@ -35,16 +34,16 @@ direction_[emdp.actions.DOWN] = [
 ]
 
 
-def make_env(num_envs, env_idx) -> emdp.gridworld.GridWorldMDP:
-    goal_list = [(1, 7), (7, 1), (7, 7), (1, 1), ]
-    if num_envs > 4:
-        _, goal_list = emdp.gridworld.txt_utilities.ascii_to_walls(ascii_room)
-        state = random.getstate()
-        random.seed(0)
-        random.shuffle(goal_list)
-        random.setstate(state)
+def make_env(task_idx) -> emdp.gridworld.GridWorldMDP:
+    goal_list = [(1, 7), (7, 1), (7, 7), (1, 1), ][:hyper.num_tasks]
+    # if num_envs > 4:
+    #     _, goal_list = emdp.gridworld.txt_utilities.ascii_to_walls(ascii_room)
+    #     state = random.getstate()
+    #     random.seed(0)
+    #     random.shuffle(goal_list)
+    #     random.setstate(state)
 
-    task_idx = env_idx % len(goal_list)
-    goal = goal_list[task_idx]
-    env = emdp.gridworld.GridWorldMDP(goal=goal, ascii_room=ascii_room)
+    # task_idx = env_idx % len(goal_list)
+    # goal = goal_list[task_idx]
+    env = emdp.gridworld.GridWorldMDP(goals=goal_list, ascii_room=ascii_room, rgb_features=False, forced_goal=task_idx)
     return env
