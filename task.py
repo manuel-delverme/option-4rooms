@@ -46,4 +46,11 @@ def make_env(task_idx) -> emdp.gridworld.GridWorldMDP:
     # task_idx = env_idx % len(goal_list)
     # goal = goal_list[task_idx]
     env = emdp.gridworld.GridWorldMDP(goals=goal_list, ascii_room=ascii_room, rgb_features=False, forced_goal=task_idx)
+    for idx, g1 in enumerate(goal_list):
+        for g2 in goal_list:
+            if g1 == g2:
+                continue
+            g2s = env.flatten_state(g2).argmax()
+            env.rewards[idx][g2s, env.rewarding_action] = -1
+            env.terminal_matrices[idx][g2s, env.rewarding_action] = True
     return env

@@ -28,19 +28,9 @@ import option_baselines.common.torch_layers
 import task
 
 
-class CustomCNN(stable_baselines3.common.torch_layers.BaseFeaturesExtractor):
+class FCExtractor(stable_baselines3.common.torch_layers.BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.spaces.Box, features_dim):
-        super(CustomCNN, self).__init__(observation_space, features_dim)
-        # We assume CxHxW images (channels first)
-        # Re-ordering will be done by pre-preprocessing or wrapper
-        assert stable_baselines3.common.preprocessing.is_image_space(observation_space, check_channels=False), (
-            "You should use NatureCNN "
-            f"only with images not with {observation_space}\n"
-            "(you are probably using `CnnPolicy` instead of `MlpPolicy` or `MultiInputPolicy`)\n"
-            "If you are using a custom environment,\n"
-            "please check it using our env checker:\n"
-            "https://stable-baselines3.readthedocs.io/en/master/common/env_checker.html"
-        )
+        super(FCExtractor, self).__init__(observation_space, features_dim)
         n_flatten = observation_space.sample().flatten().shape[0]
         self.linear = torch.nn.Sequential(
             torch.nn.Flatten(),
@@ -52,7 +42,7 @@ class CustomCNN(stable_baselines3.common.torch_layers.BaseFeaturesExtractor):
 
 
 # TODO Lel
-stable_baselines3.common.torch_layers.NatureCNN = CustomCNN
+stable_baselines3.common.torch_layers.NatureCNN = FCExtractor
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{os.environ['HOME']}/ffmpeg/ffmpeg-5.0-i686-static/"
@@ -69,7 +59,7 @@ class MetaCombinedExtractor(BaseFeaturesExtractor):
         total_concat_size = 0
         for key, subspace in observation_space.spaces.items():
             if stable_baselines3.common.preprocessing.is_image_space(subspace):
-                extractors[key] = CustomCNN(subspace, features_dim=cnn_output_dim)
+                extractors[key] = FCExtractor(subspace, features_dim=cnn_output_dim)
                 total_concat_size += cnn_output_dim
             else:
                 # The observation key is a vector, flatten it if needed
@@ -98,8 +88,26 @@ class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCri
 
 class ACP(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
     def __init__(self, *args, **kwargs):
-        kwargs["net_arch"] = [dict(pi=[64, 64], vf=[64, 64])]
+        # kwargs["net_arch"] = [dict(pi=[64, 64], vf=[64, 64])]
+        kwargs["net_arch"] = [dict(pi=[], vf=[64, 64])]
         super(ACP, self).__init__(*args, **kwargs)
+
+        action_net = self.action_net
+
+        class RemoveTask(torch.nn.Module):
+            def forward(self, x):
+                assert x.shape[1] == 83
+                x2 = torch.concat([x[:, :-2], torch.zeros(x.shape[0], 2)], dim=1)
+                return x2
+
+        self.action_net = torch.nn.Sequential(
+            RemoveTask(),
+            torch.nn.Tanh(),
+            torch.nn.Linear(83, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 83),
+            action_net
+        )
 
 
 def enjoy(env):
@@ -140,17 +148,76 @@ def enjoy(env):
             env.reset()
 
 
+class CallBack(stable_baselines3.common.callbacks.BaseCallback):
+    def __init__(self):
+        super(CallBack, self).__init__()
+        self.last_log = 0
+        task_idx_mask = torch.div(torch.arange(hyper.num_envs), hyper.num_envs_per_task, rounding_mode="trunc")
+        self.task_idx_mask = task_idx_mask.unsqueeze(0)
+
+    def _on_step(self):
+        if not (self.n_calls % 10) != 0:
+            return
+
+        meta_policy = self.locals["self"].policy.meta_policy
+        obs_tensor = self.locals["obs_tensor"]
+        features = meta_policy.extract_features(obs_tensor)
+        latent_pi, latent_vf = meta_policy.mlp_extractor(features)
+        task_idx_mask = self.task_idx_mask.squeeze()
+        num_tasks = hyper.num_tasks
+        distribution = meta_policy._get_action_dist_from_latent(latent_pi)
+        for task_idx in range(num_tasks):
+            task_dist = distribution.distribution.probs.detach()
+            self.logger.add_histogram(f"task{task_idx}/meta_distr", task_dist[task_idx_mask == task_idx], self.num_timesteps)
+
+        super(CallBack, self)._on_step()
+
+    def _on_rollout_end(self):
+        super(CallBack, self)._on_rollout_end()
+
+        if (self.num_timesteps - self.last_log) <= hyper.log_iterate_every:
+            return
+        print("progress", 1 - self.locals["self"]._current_progress_remaining)
+        self.last_log = self.num_timesteps
+        rollout_steps = self.locals["self"].n_steps
+        num_tasks = hyper.num_tasks
+        rollout_buffer = self.locals["rollout_buffer"]
+        executed_options = rollout_buffer.current_options
+        switches = rollout_buffer.current_options != rollout_buffer.previous_options
+        switches[rollout_buffer.episode_starts.astype(bool)] = False
+
+        self.logger.add_scalar("rollout/mean_returns", rollout_buffer.returns.mean(), self.num_timesteps)
+        self.logger.add_scalar("rollout/mean_rewards", rollout_buffer.rewards.mean(), self.num_timesteps)
+        self.logger.add_scalar("rollout/change_points", switches.mean(), self.num_timesteps)
+        self.logger.add_scalar("rollout/action_gap", np.inf, self.num_timesteps)
+
+        self.logger.add_histogram("rollout/executed_options", executed_options, self.num_timesteps)
+
+        env_returns = rollout_buffer.returns.mean(0)
+        task_returns = env_returns.reshape(num_tasks, -1).mean(1)
+
+        env_rewards = rollout_buffer.rewards.sum(0)
+        task_rewards = env_rewards.reshape(num_tasks, -1).mean(1)
+
+        task_idx_mask = self.task_idx_mask.repeat(rollout_steps, 1)
+        for task_idx in range(num_tasks):
+            task_executed_option = executed_options[task_idx_mask == task_idx]
+            if len(task_executed_option) < 3:
+                task_executed_option = np.tile(task_executed_option, 3)[:3]
+            self.logger.add_histogram(f"task{task_idx}/task_executed_options", task_executed_option, self.num_timesteps)
+
+            task_return = task_returns[task_idx]
+            task_reward = task_rewards[0]
+            self.logger.add_scalar(f"task{task_idx}/mean_return", task_return, self.num_timesteps)
+            self.logger.add_scalar(f"task{task_idx}/mean_rewards", task_reward, self.num_timesteps)
+
+
 def main(buddy_writer, device):
-    # test_env = task.make_env(2, 0)
-    # enjoy(test_env)
-
-    envs = wrap_envs()
-
+    envs = wrap_envs(hyper.num_tasks, hyper.num_envs_per_task)
     agent = option_baselines.aoc.AOC(
         meta_policy=MetaActorCriticPolicy,
         policy=ACP,
         env=envs,
-        n_steps=100,
         num_options=hyper.num_options,
         ent_coef=hyper.entropy_regularization,
         term_coef=hyper.termination_regularization,
@@ -159,70 +226,8 @@ def main(buddy_writer, device):
     )
     agent.set_logger(buddy_writer)
 
-    class CallBack(stable_baselines3.common.callbacks.BaseCallback):
-        def __init__(self):
-            super(CallBack, self).__init__()
-            self.last_log = 0
-            task_idx_mask = torch.div(torch.arange(hyper.num_envs), hyper.num_envs_per_task, rounding_mode="trunc")
-            self.task_idx_mask = task_idx_mask.unsqueeze(0)
-
-        def _on_step(self):
-            if not (self.n_calls % 10) != 0:
-                return
-
-            meta_policy = self.locals["self"].policy.meta_policy
-            obs_tensor = self.locals["obs_tensor"]
-            features = meta_policy.extract_features(obs_tensor)
-            latent_pi, latent_vf = meta_policy.mlp_extractor(features)
-            task_idx_mask = self.task_idx_mask.squeeze()
-            num_tasks = hyper.num_tasks
-            distribution = meta_policy._get_action_dist_from_latent(latent_pi)
-            for task_idx in range(num_tasks):
-                task_dist = distribution.distribution.probs.detach()
-                buddy_writer.add_histogram(f"task{task_idx}/meta_distr", task_dist[task_idx_mask == task_idx], self.num_timesteps)
-
-            super(CallBack, self)._on_step()
-
-        def _on_rollout_end(self):
-            super(CallBack, self)._on_rollout_end()
-
-            if (self.num_timesteps - self.last_log) <= hyper.log_iterate_every:
-                return
-            print("progress", 1 - self.locals["self"]._current_progress_remaining)
-            self.last_log = self.num_timesteps
-            rollout_steps = self.locals["self"].n_steps
-            num_tasks = hyper.num_tasks
-            rollout_buffer = self.locals["rollout_buffer"]
-            executed_options = rollout_buffer.current_options
-            switches = rollout_buffer.current_options != rollout_buffer.previous_options
-            switches[rollout_buffer.episode_starts.astype(bool)] = False
-
-            buddy_writer.add_scalar("rollout/mean_returns", rollout_buffer.returns.mean(), self.num_timesteps)
-            buddy_writer.add_scalar("rollout/mean_rewards", rollout_buffer.rewards.mean(), self.num_timesteps)
-            buddy_writer.add_scalar("rollout/change_points", switches.mean(), self.num_timesteps)
-
-            buddy_writer.add_histogram("rollout/executed_options", executed_options, self.num_timesteps)
-
-            env_returns = rollout_buffer.returns.mean(0)
-            task_returns = env_returns.reshape(num_tasks, -1).mean(1)
-
-            env_rewards = rollout_buffer.rewards.sum(0)
-            task_rewards = env_rewards.reshape(num_tasks, -1).mean(1)
-
-            task_idx_mask = self.task_idx_mask.repeat(rollout_steps, 1)
-            for task_idx in range(num_tasks):
-                task_executed_option = executed_options[task_idx_mask == task_idx]
-                if len(task_executed_option) < 3:
-                    task_executed_option = np.tile(task_executed_option, 3)[:3]
-                buddy_writer.add_histogram(f"task{task_idx}/task_executed_options", task_executed_option, self.num_timesteps)
-
-                task_return = task_returns[task_idx]
-                task_reward = task_rewards[0]
-                buddy_writer.add_scalar(f"task{task_idx}/mean_return", task_return, self.num_timesteps)
-                buddy_writer.add_scalar(f"task{task_idx}/mean_rewards", task_reward, self.num_timesteps)
-
     cb = stable_baselines3.common.callbacks.CallbackList([
-        option_baselines.common.callbacks.OptionRollout(envs, eval_freq=hyper.video_every, n_eval_episodes=5 if hyper.DEBUG else 1),
+        option_baselines.common.callbacks.OptionRollout(envs, eval_freq=hyper.video_every, n_eval_episodes=hyper.num_envs),
         wandb.integration.sb3.WandbCallback(gradient_save_freq=100),
         CallBack(),
     ])
@@ -240,13 +245,11 @@ def should_record_video(step):
     return False
 
 
-def wrap_envs():
+def wrap_envs(num_tasks, num_envs_per_task):
     indices = []
-    for idx in range(hyper.num_tasks):
-        indices.extend([idx] * hyper.num_envs_per_task)
-    envs = stable_baselines3.common.vec_env.DummyVecEnv(
-        env_fns=[functools.partial(task.make_env, idx) for idx in indices],
-    )
+    for idx in range(num_tasks):
+        indices.extend([idx] * num_envs_per_task)
+    envs = stable_baselines3.common.vec_env.DummyVecEnv(env_fns=[functools.partial(task.make_env, idx) for idx in indices], )
     envs = stable_baselines3.common.vec_env.VecVideoRecorder(
         envs,
         video_folder="videos/",
