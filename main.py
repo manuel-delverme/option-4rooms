@@ -65,10 +65,10 @@ class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCri
         super(MetaActorCriticPolicy, self).__init__(*args, **kwargs)
 
 
-class ACP(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
+class PoliciesNoTask(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
     def __init__(self, *args, **kwargs):
         kwargs["net_arch"] = [dict(pi=[], vf=[64, 64])]
-        super(ACP, self).__init__(*args, **kwargs)
+        super(PoliciesNoTask, self).__init__(*args, **kwargs)
 
         action_net = self.action_net
 
@@ -92,7 +92,7 @@ def main(buddy_writer, device):
     envs = wrap_envs(hyper.num_tasks, hyper.num_envs_per_task)
     agent = option_baselines.aoc.AOC(
         meta_policy=MetaActorCriticPolicy,
-        policy=ACP,
+        policy=PoliciesNoTask,
         env=envs,
         num_options=hyper.num_options,
         ent_coef=hyper.entropy_regularization,
