@@ -4,17 +4,6 @@ import emdp.actions
 import emdp.gridworld
 import hyper
 
-ascii_room = """
-#########
-#   #   #
-#       #
-#   #   #
-## ### ##
-#   #   #
-#       #
-#   #   #
-#########"""[1:].split('\n')
-
 direction_ = np.zeros((4, 2, 2))
 direction_[emdp.actions.LEFT] = [
     [-1, 1],
@@ -35,16 +24,41 @@ direction_[emdp.actions.DOWN] = [
 
 
 def make_env(task_idx) -> emdp.gridworld.GridWorldMDP:
-    goal_list = [(1, 7), (7, 1), (7, 7), (1, 1), ][:hyper.num_tasks]
-    # if num_envs > 4:
-    #     _, goal_list = emdp.gridworld.txt_utilities.ascii_to_walls(ascii_room)
-    #     state = random.getstate()
-    #     random.seed(0)
-    #     random.shuffle(goal_list)
-    #     random.setstate(state)
+    env = make_4rooms(task_idx)
+    return env
 
-    # task_idx = env_idx % len(goal_list)
-    # goal = goal_list[task_idx]
+
+def make_2states():
+    ascii_room = """
+    ####
+    #  #
+    # ##
+    ####
+    """.split('\n')[1:-1]
+
+    goal = (1, 3)
+    env = NumpyWrapper(goal=goal, ascii_room=ascii_room)
+    return env
+
+
+class NumpyWrapper(emdp.gridworld.GridWorldMDP):
+    def step(self, action):
+        return super(NumpyWrapper, self).step(int(action))
+
+
+def make_4rooms(task_idx):
+    ascii_room = """
+    #########
+    #   #   #
+    #       #
+    #   #   #
+    ## ### ##
+    #   #   #
+    #       #
+    #   #   #
+    #########"""[1:].split('\n')
+
+    goal_list = [(1, 7), (7, 1), (7, 7), (1, 1), ][:hyper.num_tasks]
     env = emdp.gridworld.GridWorldMDP(goals=goal_list, ascii_room=ascii_room, rgb_features=False, forced_goal=task_idx)
     for idx, g1 in enumerate(goal_list):
         for g2 in goal_list:

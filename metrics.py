@@ -9,8 +9,7 @@ class CallBack(stable_baselines3.common.callbacks.BaseCallback):
     def __init__(self):
         super(CallBack, self).__init__()
         self.last_log = 0
-        task_idx_mask = torch.div(torch.arange(hyper.num_envs), hyper.num_envs_per_task, rounding_mode="trunc")
-        self.task_idx_mask = task_idx_mask.unsqueeze(0)
+        self.task_idx_mask = False
 
     def _on_step(self):
         if not (self.n_calls % 10) != 0:
@@ -49,21 +48,3 @@ class CallBack(stable_baselines3.common.callbacks.BaseCallback):
         self.logger.add_scalar("rollout/action_gap", np.inf, self.num_timesteps)
 
         self.logger.add_histogram("rollout/executed_options", executed_options, self.num_timesteps)
-
-        env_returns = rollout_buffer.returns.mean(0)
-        task_returns = env_returns.reshape(num_tasks, -1).mean(1)
-
-        env_rewards = rollout_buffer.rewards.sum(0)
-        task_rewards = env_rewards.reshape(num_tasks, -1).mean(1)
-
-        task_idx_mask = self.task_idx_mask.repeat(rollout_steps, 1)
-        for task_idx in range(num_tasks):
-            task_executed_option = executed_options[task_idx_mask == task_idx]
-            if len(task_executed_option) < 3:
-                task_executed_option = np.tile(task_executed_option, 3)[:3]
-            self.logger.add_histogram(f"task{task_idx}/task_executed_options", task_executed_option, self.num_timesteps)
-
-            task_return = task_returns[task_idx]
-            task_reward = task_rewards[0]
-            self.logger.add_scalar(f"task{task_idx}/mean_return", task_return, self.num_timesteps)
-            self.logger.add_scalar(f"task{task_idx}/mean_rewards", task_reward, self.num_timesteps)
