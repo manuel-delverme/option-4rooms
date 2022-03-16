@@ -65,34 +65,21 @@ class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCri
         super(MetaActorCriticPolicy, self).__init__(*args, **kwargs)
 
 
-class PoliciesNoTask(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
-    def __init__(self, *args, **kwargs):
-        kwargs["net_arch"] = [dict(pi=[], vf=[64, 64])]
-        super(PoliciesNoTask, self).__init__(*args, **kwargs)
-
-        action_net = self.action_net
-
-        class RemoveTask(torch.nn.Module):
-            def forward(self, x):
-                assert x.shape[1] == 83
-                x2 = torch.concat([x[:, :-2], torch.zeros(x.shape[0], 2)], dim=1)
-                return x2
-
-        self.action_net = torch.nn.Sequential(
-            RemoveTask(),
-            torch.nn.Tanh(),
-            torch.nn.Linear(83, 64),
-            torch.nn.Tanh(),
-            torch.nn.Linear(64, 83),
-            action_net
-        )
+class PolicyHideTask(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
+    def extract_features(self, obs: torch.Tensor) -> torch.Tensor:
+        obs = {
+            "image": obs["image"],
+            "task": obs["task"] * 0,
+        }
+        obs = super().extract_features(obs)
+        return obs
 
 
-def main(buddy_writer, device):
+def main():
     envs = wrap_envs(hyper.num_tasks, hyper.num_envs_per_task)
     agent = option_baselines.aoc.AOC(
         meta_policy=MetaActorCriticPolicy,
-        policy=PoliciesNoTask,
+        policy=PolicyHideTask,
         env=envs,
         num_options=hyper.num_options,
         ent_coef=hyper.entropy_regularization,
