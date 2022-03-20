@@ -1,6 +1,6 @@
 import sys
 
-DEBUG = False # '_pydev_bundle.pydev_log' in sys.modules.keys()
+DEBUG = '_pydev_bundle.pydev_log' in sys.modules.keys()
 
 discount = 0.99
 training_steps = 100_000
@@ -25,17 +25,15 @@ lr_mu = 0.1
 
 eps_decay = 100_000
 
-
 optimistic_init = True
 features = 256
 task = "multitask"  # task = "door-key"
 conv_channels = 32
 
-
 # Options
 num_options = 2
 num_envs_per_task = 3
-num_tasks = 2
+num_tasks = 4
 
 num_envs = num_envs_per_task * num_tasks
 # option_schedule = np.array([0, 0])  # , 150_000])

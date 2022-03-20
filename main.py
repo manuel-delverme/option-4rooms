@@ -3,7 +3,6 @@ import functools
 import os
 
 import experiment_buddy
-import gym
 import numpy as np
 import stable_baselines3
 import stable_baselines3.common.callbacks
@@ -12,11 +11,8 @@ import stable_baselines3.common.preprocessing
 import stable_baselines3.common.torch_layers
 import stable_baselines3.common.type_aliases
 import stable_baselines3.common.vec_env
-import torch
-import torch.distributions
 import torch.nn
 import wandb.integration.sb3
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 import hyper
 import metrics
@@ -32,19 +28,18 @@ os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{os.environ['HOME']}/ffmp
 assert distutils.spawn.find_executable("ffmpeg")
 
 
-class MetaActorCriticPolicy(stable_baselines3.common.policies.ActorCriticPolicy):
+class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
     def __init__(self, *args, **kwargs):
-        # kwargs["features_extractor_class"] = MetaCombinedExtractor
         kwargs["net_arch"] = []
-        super(MetaActorCriticPolicy, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
 
 def main(buddy_writer):
-    envs = stable_baselines3.common.vec_env.DummyVecEnv(env_fns=[task.make_2states], )
+    envs = stable_baselines3.common.vec_env.DummyVecEnv(env_fns=[functools.partial(task.make_4rooms, task_idx=idx, num_tasks=hyper.num_tasks) for idx in range(hyper.num_tasks)], )
     envs.seed(hyper.seed)
     agent = option_baselines.aoc.AOC(
         meta_policy=MetaActorCriticPolicy,
-        policy=stable_baselines3.common.policies.ActorCriticPolicy,
+        policy=stable_baselines3.common.policies.MultiInputActorCriticPolicy,
         env=envs,
         num_options=hyper.num_options,
         ent_coef=hyper.entropy_regularization,
@@ -55,7 +50,7 @@ def main(buddy_writer):
     agent.set_logger(buddy_writer)
 
     cb = stable_baselines3.common.callbacks.CallbackList([
-        option_baselines.common.callbacks.OptionRollout(envs, eval_freq=hyper.video_every, n_eval_episodes=hyper.num_envs),
+        # option_baselines.common.callbacks.OptionRollout(envs, eval_freq=hyper.video_every, n_eval_episodes=hyper.num_envs),
         wandb.integration.sb3.WandbCallback(gradient_save_freq=100),
         metrics.CallBack(),
     ])
@@ -77,5 +72,5 @@ if __name__ == "__main__":
     np.random.seed(hyper.seed)
     torch.manual_seed(hyper.seed)
     experiment_buddy.register_defaults(vars(hyper))
-    tb = experiment_buddy.deploy(wandb_kwargs={"mode": "disabled"})
+    tb = experiment_buddy.deploy(disabled=hyper.DEBUG)
     main(tb)
