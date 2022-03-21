@@ -30,8 +30,39 @@ assert distutils.spawn.find_executable("ffmpeg")
 
 class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
     def __init__(self, *args, **kwargs):
-        kwargs["net_arch"] = []
+        # kwargs["net_arch"] = []
         super().__init__(*args, **kwargs)
+
+
+class ShatteredPolicies(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
+    def __init__(self, *args, **kwargs):
+        kwargs["net_arch"] = [dict(pi=[], vf=[64, 64])]
+        super(ShatteredPolicies, self).__init__(*args, **kwargs)
+        lr_schedule = args[2]
+
+        class ShatterInput(torch.nn.Module):
+            def __init__(self, features_dim):
+                super(ShatterInput, self).__init__()
+                self.features_dim = features_dim
+
+                self.mask = torch.ones(features_dim)
+                # self.mask[-hyper.num_tasks:] = 0
+
+            def forward(self, x):
+                x2 = torch.einsum("bf,f->bf", x, self.mask)
+                return x2
+
+        features_dims = self.features_extractor.features_dim
+        # state_dim = self.observation_space.spaces['image'].shape[0] + hyper.num_tasks
+        self.action_net = torch.nn.Sequential(
+            ShatterInput(features_dims),
+            torch.nn.Tanh(),
+            torch.nn.Linear(features_dims, features_dims),
+            torch.nn.Tanh(),
+            torch.nn.Linear(features_dims, features_dims),
+            self.action_net,
+        )
+        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
 
 
 def main(buddy_writer):
@@ -46,6 +77,7 @@ def main(buddy_writer):
         term_coef=hyper.termination_regularization,
         switching_margin=hyper.switching_margin,
         gamma=hyper.discount,
+        learning_rate=hyper.lr_pi,
     )
     agent.set_logger(buddy_writer)
 
