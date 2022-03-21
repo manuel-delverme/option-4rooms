@@ -27,6 +27,7 @@ os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{os.environ['HOME']}/ffmp
 
 assert distutils.spawn.find_executable("ffmpeg")
 
+stable_baselines3.common.torch_layers.NatureCNN = option_baselines.common.torch_layers.NatureCNN
 
 class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
     def __init__(self, *args, **kwargs):
@@ -66,7 +67,7 @@ class ShatteredPolicies(stable_baselines3.common.policies.MultiInputActorCriticP
 
 
 def main(buddy_writer):
-    envs = stable_baselines3.common.vec_env.DummyVecEnv(env_fns=[functools.partial(task.make_4rooms, task_idx=idx, num_tasks=hyper.num_tasks) for idx in range(hyper.num_tasks)], )
+    envs = stable_baselines3.common.vec_env.DummyVecEnv(env_fns=[task.make_pakman for _ in range(hyper.num_envs)], )
     envs.seed(hyper.seed)
     agent = option_baselines.aoc.AOC(
         meta_policy=MetaActorCriticPolicy,

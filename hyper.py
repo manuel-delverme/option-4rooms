@@ -32,8 +32,8 @@ conv_channels = 32
 
 # Options
 num_options = 2
-num_envs_per_task = 3
-num_tasks = 4
+num_envs_per_task = 12
+num_tasks = 1
 
 num_envs = num_envs_per_task * num_tasks
 # option_schedule = np.array([0, 0])  # , 150_000])
