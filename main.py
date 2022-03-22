@@ -1,5 +1,4 @@
 import distutils.spawn
-import functools
 import os
 
 import experiment_buddy
@@ -27,7 +26,8 @@ os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{os.environ['HOME']}/ffmp
 
 assert distutils.spawn.find_executable("ffmpeg")
 
-stable_baselines3.common.torch_layers.NatureCNN = option_baselines.common.torch_layers.NatureCNN
+stable_baselines3.common.torch_layers.NatureCNN = option_baselines.common.torch_layers.SimpleCNN
+
 
 class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
     def __init__(self, *args, **kwargs):
@@ -35,43 +35,24 @@ class MetaActorCriticPolicy(stable_baselines3.common.policies.MultiInputActorCri
         super().__init__(*args, **kwargs)
 
 
-class ShatteredPolicies(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
+class OptionCriticPolicy(stable_baselines3.common.policies.MultiInputActorCriticPolicy):
     def __init__(self, *args, **kwargs):
-        kwargs["net_arch"] = [dict(pi=[], vf=[64, 64])]
-        super(ShatteredPolicies, self).__init__(*args, **kwargs)
-        lr_schedule = args[2]
-
-        class ShatterInput(torch.nn.Module):
-            def __init__(self, features_dim):
-                super(ShatterInput, self).__init__()
-                self.features_dim = features_dim
-
-                self.mask = torch.ones(features_dim)
-                # self.mask[-hyper.num_tasks:] = 0
-
-            def forward(self, x):
-                x2 = torch.einsum("bf,f->bf", x, self.mask)
-                return x2
-
-        features_dims = self.features_extractor.features_dim
-        # state_dim = self.observation_space.spaces['image'].shape[0] + hyper.num_tasks
-        self.action_net = torch.nn.Sequential(
-            ShatterInput(features_dims),
-            torch.nn.Tanh(),
-            torch.nn.Linear(features_dims, features_dims),
-            torch.nn.Tanh(),
-            torch.nn.Linear(features_dims, features_dims),
-            self.action_net,
-        )
-        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+        # kwargs["net_arch"] = []
+        super().__init__(*args, **kwargs)
 
 
 def main(buddy_writer):
     envs = stable_baselines3.common.vec_env.DummyVecEnv(env_fns=[task.make_pakman for _ in range(hyper.num_envs)], )
+    envs = stable_baselines3.common.vec_env.VecVideoRecorder(
+        envs,
+        video_folder="videos/",
+        record_video_trigger=should_record_video,
+        video_length=hyper.running_performance_window)
+
     envs.seed(hyper.seed)
     agent = option_baselines.aoc.AOC(
         meta_policy=MetaActorCriticPolicy,
-        policy=stable_baselines3.common.policies.MultiInputActorCriticPolicy,
+        policy=OptionCriticPolicy,
         env=envs,
         num_options=hyper.num_options,
         ent_coef=hyper.entropy_regularization,
@@ -79,6 +60,10 @@ def main(buddy_writer):
         switching_margin=hyper.switching_margin,
         gamma=hyper.discount,
         learning_rate=hyper.lr_pi,
+        policy_kwargs={
+            "optimizer_class": torch.optim.Adam,
+            "optimizer_kwargs": {},
+        },
     )
     agent.set_logger(buddy_writer)
 

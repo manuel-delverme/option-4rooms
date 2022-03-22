@@ -10,7 +10,7 @@ log_iterate_every = 100
 slow_log_iterate_every = 10 * log_iterate_every
 checkpoint_every = 100_000
 video_every = 10_000
-running_performance_window = video_every
+running_performance_window = 1_000
 
 # Misc
 seed = 0
@@ -21,18 +21,13 @@ switching_margin = 0.0
 termination_regularization = 0.0
 
 lr_pi = 7e-4
-lr_mu = 0.1
-
-eps_decay = 100_000
 
 optimistic_init = True
-features = 256
 task = "multitask"  # task = "door-key"
-conv_channels = 32
 
 # Options
-num_options = 2
-num_envs_per_task = 12
+num_options = 1
+num_envs_per_task = 6
 num_tasks = 1
 
 num_envs = num_envs_per_task * num_tasks
